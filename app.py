@@ -1,11 +1,9 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
 import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
 import uuid
-import os
 from datetime import datetime, timedelta
 import random
 
@@ -15,79 +13,63 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- AUTO-GENERATE DATABASE IF RUNNING ON CLOUD FOR THE FIRST TIME ---
-DB_FILE = "helpdesk_warehouse.db"
+# --- IN-MEMORY DATASET GENERATOR (CLOUD-SAFE & INSTANT) ---
+@st.cache_data
+def get_default_data():
+    categories = ['Access/MFA', 'Network/VPN', 'Hardware', 'Software', 'Database']
+    teams = ['Tier-1 Support', 'NetOps', 'SysAdmin', 'SecOps', 'Desktop-Support']
+    priorities = ['P1-Critical', 'P2-High', 'P3-Medium', 'P4-Low']
+    sla_targets = {'P1-Critical': 4.0, 'P2-High': 12.0, 'P3-Medium': 48.0, 'P4-Low': 96.0}
 
-def initialize_database():
-    if not os.path.exists(DB_FILE):
-        with st.spinner("Initializing 50,000 enterprise tickets data warehouse..."):
-            categories = ['Access/MFA', 'Network/VPN', 'Hardware', 'Software', 'Database']
-            teams = ['Tier-1 Support', 'NetOps', 'SysAdmin', 'SecOps', 'Desktop-Support']
-            priorities = ['P1-Critical', 'P2-High', 'P3-Medium', 'P4-Low']
-            sla_targets = {'P1-Critical': 4.0, 'P2-High': 12.0, 'P3-Medium': 48.0, 'P4-Low': 96.0}
+    start_time = datetime(2026, 1, 1, 9, 0, 0)
+    data = []
 
-            start_time = datetime(2026, 1, 1, 9, 0, 0)
-            data = []
+    # 50,000 realistic records
+    for _ in range(50000):
+        created = start_time + timedelta(minutes=random.randint(0, 90 * 24 * 60))
+        priority = random.choices(priorities, weights=[0.05, 0.15, 0.50, 0.30])[0]
+        base_hours = {'P1-Critical': 2.0, 'P2-High': 8.0, 'P3-Medium': 24.0, 'P4-Low': 72.0}[priority]
+        actual_hours = max(0.2, random.gauss(base_hours, base_hours * 0.4))
+        resolved = created + timedelta(hours=actual_hours)
+        
+        has_error = random.random() < 0.08
+        err = f"ERR_50{random.randint(0, 4)}" if has_error else 'NONE'
 
-            for _ in range(50000):
-                created = start_time + timedelta(minutes=random.randint(0, 90 * 24 * 60))
-                priority = random.choices(priorities, weights=[0.05, 0.15, 0.50, 0.30])[0]
-                base_hours = {'P1-Critical': 2.0, 'P2-High': 8.0, 'P3-Medium': 24.0, 'P4-Low': 72.0}[priority]
-                actual_hours = max(0.2, random.gauss(base_hours, base_hours * 0.4))
-                resolved = created + timedelta(hours=actual_hours)
-                
-                has_error = random.random() < 0.08
-                err = f"ERR_50{random.randint(0, 4)}" if has_error else 'NONE'
+        data.append({
+            "ticket_id": f"TCK-{uuid.uuid4().hex[:8].upper()}",
+            "created_at": created,
+            "resolved_at": resolved,
+            "category": random.choice(categories),
+            "priority": priority,
+            "assigned_team": random.choice(teams),
+            "error_code": err,
+            "reopen_count": random.choices([0, 1, 2], weights=[0.85, 0.10, 0.05])[0]
+        })
 
-                data.append({
-                    "ticket_id": f"TCK-{uuid.uuid4().hex[:8].upper()}",
-                    "created_at": created.isoformat(),
-                    "resolved_at": resolved.isoformat(),
-                    "category": random.choice(categories),
-                    "priority": priority,
-                    "assigned_team": random.choice(teams),
-                    "error_code": err,
-                    "reopen_count": random.choices([0, 1, 2], weights=[0.85, 0.10, 0.05])[0]
-                })
+    # Injected outage spike: 500 tickets in 2 hours
+    outage_start = start_time + timedelta(days=15, hours=10)
+    for _ in range(500):
+        created = outage_start + timedelta(minutes=random.randint(0, 120))
+        data.append({
+            "ticket_id": f"TCK-{uuid.uuid4().hex[:8].upper()}",
+            "created_at": created,
+            "resolved_at": outage_start + timedelta(hours=random.uniform(1.5, 4.0)),
+            "category": "Network/VPN",
+            "priority": "P1-Critical",
+            "assigned_team": "NetOps",
+            "error_code": "ERR_502",
+            "reopen_count": 0
+        })
 
-            # Intentional outage spike
-            outage_start = start_time + timedelta(days=15, hours=10)
-            for _ in range(500):
-                data.append({
-                    "ticket_id": f"TCK-{uuid.uuid4().hex[:8].upper()}",
-                    "created_at": (outage_start + timedelta(minutes=random.randint(0, 120))).isoformat(),
-                    "resolved_at": (outage_start + timedelta(hours=random.uniform(1.5, 4.0))).isoformat(),
-                    "category": "Network/VPN",
-                    "priority": "P1-Critical",
-                    "assigned_team": "NetOps",
-                    "error_code": "ERR_502",
-                    "reopen_count": 0
-                })
-
-            df = pd.DataFrame(data)
-            df['created_at_dt'] = pd.to_datetime(df['created_at'])
-            df['resolved_at_dt'] = pd.to_datetime(df['resolved_at'])
-            df['resolution_hours'] = ((df['resolved_at_dt'] - df['created_at_dt']).dt.total_seconds() / 3600.0).round(2)
-            df['sla_target_hours'] = df['priority'].map(sla_targets)
-            df['is_sla_breached'] = df['resolution_hours'] > df['sla_target_hours']
-            df = df.drop(columns=['created_at_dt', 'resolved_at_dt'])
-
-            conn = sqlite3.connect(DB_FILE)
-            df.to_sql('fact_tickets', conn, if_exists='replace', index=False)
-            conn.close()
-
-initialize_database()
+    df = pd.DataFrame(data)
+    df['resolution_hours'] = ((df['resolved_at'] - df['created_at']).dt.total_seconds() / 3600.0).round(2)
+    df['sla_target_hours'] = df['priority'].map(sla_targets)
+    df['is_sla_breached'] = df['resolution_hours'] > df['sla_target_hours']
+    return df
 
 # --- SIDEBAR & FILE UPLOADER ---
 st.sidebar.title("Data Source")
 uploaded_file = st.sidebar.file_uploader("Upload custom data (CSV or Excel)", type=["csv", "xlsx", "xls"])
-
-@st.cache_data
-def load_default_data():
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql("SELECT * FROM fact_tickets", conn)
-    conn.close()
-    return df
 
 if uploaded_file is not None:
     try:
@@ -96,35 +78,30 @@ if uploaded_file is not None:
         else:
             df = pd.read_excel(uploaded_file)
         st.sidebar.success(f"Loaded: {uploaded_file.name}")
+        df['created_at'] = pd.to_datetime(df['created_at'])
+        df['resolved_at'] = pd.to_datetime(df['resolved_at'])
+        if 'resolution_hours' not in df.columns:
+            df['resolution_hours'] = ((df['resolved_at'] - df['created_at']).dt.total_seconds() / 3600.0).round(2)
+        if 'is_sla_breached' not in df.columns:
+            sla_map = {'P1-Critical': 4.0, 'P2-High': 12.0, 'P3-Medium': 48.0, 'P4-Low': 96.0}
+            df['sla_target_hours'] = df['priority'].map(sla_map).fillna(48.0)
+            df['is_sla_breached'] = df['resolution_hours'] > df['sla_target_hours']
+        if 'error_code' not in df.columns:
+            df['error_code'] = 'NONE'
     except Exception as e:
-        st.sidebar.error(f"Error loading file: {e}")
-        df = load_default_data()
+        st.sidebar.error(f"Error reading file: {e}")
+        df = get_default_data()
 else:
-    df = load_default_data()
+    df = get_default_data()
     st.sidebar.info("Using default 50,000 ticket dataset.")
 
-# Ensure datetimes and metrics exist
-df['created_at'] = pd.to_datetime(df['created_at'])
-df['resolved_at'] = pd.to_datetime(df['resolved_at'])
-
-if 'resolution_hours' not in df.columns:
-    df['resolution_hours'] = ((df['resolved_at'] - df['created_at']).dt.total_seconds() / 3600.0).round(2)
-
-if 'is_sla_breached' not in df.columns:
-    sla_map = {'P1-Critical': 4.0, 'P2-High': 12.0, 'P3-Medium': 48.0, 'P4-Low': 96.0}
-    df['sla_target_hours'] = df['priority'].map(sla_map).fillna(48.0)
-    df['is_sla_breached'] = df['resolution_hours'] > df['sla_target_hours']
-
-if 'error_code' not in df.columns:
-    df['error_code'] = 'NONE'
-
 # --- FILTERS ---
-selected_category = st.sidebar.multiselect("Category", options=df['category'].unique(), default=df['category'].unique())
-selected_priority = st.sidebar.multiselect("Priority", options=df['priority'].unique(), default=df['priority'].unique())
+selected_category = st.sidebar.multiselect("Category", options=sorted(df['category'].unique()), default=df['category'].unique())
+selected_priority = st.sidebar.multiselect("Priority", options=sorted(df['priority'].unique()), default=df['priority'].unique())
 
 filtered_df = df[(df['category'].isin(selected_category)) & (df['priority'].isin(selected_priority))]
 
-# --- DASHBOARD UI ---
+# --- DASHBOARD HEADER ---
 st.title("🖥️ IT Helpdesk Analytics & Incident Detection Platform")
 st.markdown("Automated batch processing, SLA tracking, and Z-score outage detection for enterprise support records.")
 
