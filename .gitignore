@@ -1,0 +1,4 @@
+__pycache__/
+helpdesk_warehouse.db
+*.csv
+*.parquet
